@@ -5,7 +5,7 @@
 // @supportURL   https://app.tornscope.com
 // @downloadURL  https://update.greasyfork.org/scripts/601526/TornScope.user.js
 // @updateURL    https://update.greasyfork.org/scripts/601526/TornScope.meta.js
-// @version      3.8.2
+// @version      3.8.3
 // @description  Track Torn players: flights, landings, alarms, War mode and Premium server tracking. Works with the TornScope site and Torn PDA | Developer: Zeussh (4268037)
 // @match        https://www.torn.com/*
 // @run-at       document-end
@@ -29,7 +29,7 @@
   const ABROAD = 20000;        // target abroad
   const OTHER = 30000;         // hospital, jail...
   const ONLINE_WINDOW = 300;   // seconds: active within the last 5 min = "online"
-  const VERSION = '3.8.2';
+  const VERSION = '3.8.3';
   const TRAVEL_URL = 'https://www.torn.com/page.php?sid=travel';
   const SITE_URL = 'https://app.tornscope.com';
   const LOGO = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none"><g stroke="currentColor" stroke-linecap="round" fill="none"><circle cx="32" cy="32" r="29" stroke-width="3"/><circle cx="32" cy="32" r="19" stroke-width="2" stroke-opacity=".75"/><circle cx="32" cy="32" r="9" stroke-width="2" stroke-opacity=".75"/><path d="M32 4v13M32 47v13M4 32h13M47 32h13" stroke-width="1.5" stroke-opacity=".5"/></g><path d="M32 32L41.0 4.4A29 29 0 0 1 48.8 8.4Z" fill="#16D9F2" fill-opacity="0.07"/><path d="M32 32L48.8 8.4A29 29 0 0 1 55.2 14.5Z" fill="#16D9F2" fill-opacity="0.12"/><path d="M32 32L55.2 14.5A29 29 0 0 1 59.3 22.3Z" fill="#16D9F2" fill-opacity="0.19"/><path d="M32 32L59.3 22.3A29 29 0 0 1 61.0 31.0Z" fill="#16D9F2" fill-opacity="0.3"/><path d="M32 32L61.0 31.0" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="47" cy="19" r="3.6" fill="var(--blip,#fff)" fill-opacity=".2"/><circle cx="47" cy="19" r="2.3" fill="var(--blip,#fff)"/><circle cx="41" cy="11.5" r="1.5" fill="var(--blip,#fff)" fill-opacity=".85"/><circle cx="32" cy="32" r="3" fill="currentColor"/></svg>';
@@ -188,7 +188,11 @@
   }
 
   // Destination / direction from Torn's wording (works whatever the exact sentence is).
-  const ALIASES = { 'cayman': 'Cayman Islands', 'uk': 'United Kingdom', 'uae': 'United Arab Emirates' };
+  const ALIASES = { 'cayman': 'Cayman Islands', 'uk': 'United Kingdom', 'uae': 'United Arab Emirates',
+    // hospital abroad: "In a Canadian hospital for 58 mins" = in Canada
+    'british': 'United Kingdom', 'canadian': 'Canada', 'mexican': 'Mexico', 'caymanian': 'Cayman Islands', 'hawaiian': 'Hawaii',
+    'argentinian': 'Argentina', 'argentine': 'Argentina', 'swiss': 'Switzerland', 'japanese': 'Japan', 'chinese': 'China',
+    'emirati': 'United Arab Emirates', 'south african': 'South Africa' };
   function destOf(desc) {
     const d = String(desc || '');
     const known = Object.keys(BASE_MIN).find(k => d.includes(k));
@@ -431,6 +435,20 @@
 
     L.t0 = null;
     L.until = 0; L.untilSrc = '';
+    // Hospital / jail: Torn gives the release time of any player. Re-checked while he is inside, so a revive, a
+    // medical item (shorter) or a bad blood bag / new hit (longer) moves the time shown (2026-11-04, momo's ask).
+    const outAt = (st.state === 'Hospital' || st.state === 'Jail') && Number(st.until) > nowSec ? Number(st.until) : 0;
+    if (outAt) {
+      const prevOut = previousState === st.state ? (L.outAt || 0) : 0;
+      if (prevOut && Math.abs(outAt - prevOut) >= 90) { L.outShift = outAt - prevOut; L.outShiftAt = nowSec; }
+      else if (!prevOut) { L.outShift = 0; L.outShiftAt = 0; }
+      L.outAt = outAt;
+      const left = (outAt - nowSec) * 1000;
+      // far from the end: every 2 min; last 10 min: every 30 s; and a check right after the release time
+      L.mode = 'hosp'; L.nextAt = now + Math.min(left > 600000 ? 120000 : OTHER, Math.max(5000, left + 2000));
+      return;
+    }
+    L.outAt = 0; L.outShift = 0; L.outShiftAt = 0;
     if (st.state === 'Okay') {
       const online = la.status === 'Online' || (now / 1000 - (la.timestamp || 0)) < ONLINE_WINDOW;
       L.mode = online ? 'fast' : 'slow'; L.nextAt = now + (online ? cfg().fast * 1000 : SLOW);
@@ -1225,7 +1243,7 @@
     $('.bd').dataset.tab = k;
   }
 
-  const MODES = { fast: () => `⚡ ${cfg().fast} s`, slow: () => '60 s', pause: () => 'paused until landing', abroad: () => '20 s', other: () => '30 s' };
+  const MODES = { fast: () => `⚡ ${cfg().fast} s`, slow: () => '60 s', pause: () => 'paused until landing', abroad: () => '20 s', other: () => '30 s', hosp: () => 'checked every 2 min, 30 s near the end' };
   const COLORS = { Okay: '#34d399', Traveling: '#16d9f2', Abroad: '#60a5fa', Hospital: '#f87171', Jail: '#f87171' };
   function chip(L) {
     if (L.state === 'Okay') return 'Okay';
@@ -1237,7 +1255,8 @@
 
   // Destination filter + "next landing" sort (2026-11-04, apneatic's ask). The destination of a flight is where it
   // lands: the country going out, Torn coming back. "In <country>" counts for that country too.
-  const placeOf = (L) => L.state === 'Traveling' ? (isReturn(L.desc) ? 'Torn' : destOf(L.desc)) : L.state === 'Abroad' ? destOf(L.desc) : '';
+  const placeOf = (L) => L.state === 'Traveling' ? (isReturn(L.desc) ? 'Torn' : destOf(L.desc)) : L.state === 'Abroad' ? destOf(L.desc)
+    : L.state === 'Hospital' && BASE_MIN[destOf(L.desc)] ? destOf(L.desc) : '';
   const listView = () => ({ dest: String(store.get('fdest', '') || ''), sort: store.get('fsort', '') === 'land' ? 'land' : '' });
   function shownTargets() {
     const v = listView();
@@ -1300,6 +1319,13 @@
           if (t0 && L.until * 1000 > t0) { prog = `<div class="pb"><i data-lv="pb:${esc(t.id)}" style="width:0%"></i></div>`; lv['pb:' + t.id] = { w: Math.min(100, Math.max(0, (now - t0) / (L.until * 1000 - t0) * 100)).toFixed(1) + '%' }; }
         } else line += ' <i>· landing time unknown</i>';
       } else if (L.state === 'Abroad') line = 'In ' + esc(dest || L.desc.replace(/^In /i, ''));
+      else if ((L.state === 'Hospital' || L.state === 'Jail') && L.outAt) {
+        const abroad = L.state === 'Hospital' && BASE_MIN[dest] ? ' in ' + esc(dest) : '';
+        line = (L.state === 'Hospital' ? '🏥 Hospital' : '⛓ Jail') + abroad + ` <i data-lv="cd:${esc(t.id)}"></i>`;
+        const left = L.outAt - now / 1000;
+        lv['cd:' + t.id] = left > 0 ? `· out ${hhmm(L.outAt)} (in ${fmtDur(left)})` : '· should be out now';
+        if (L.outShift && now / 1000 - L.outShiftAt < 1800) line += ` <span class="${L.outShift < 0 ? 'v' : 'e'}" title="Release time changed since the last check">${L.outShift < 0 ? '−' : '+'}${Math.max(1, Math.round(Math.abs(L.outShift) / 60))} min${L.outShift < 0 ? ' (revived / healed?)' : ''}</span>`;
+      }
       else line = esc(L.desc || '—');
       const src = L.state === 'Traveling' && L.until ? (L.untilSrc === 'api' ? '<span class="v">✓ Torn</span>' : '<span class="e">≈ est.</span>') : '';
       const info = running && Date.now() < tornDownUntil ? `<span class="err">${esc(tornDownText())}</span>` : L.err ? `<span class="err">${esc(L.err)}</span>`
