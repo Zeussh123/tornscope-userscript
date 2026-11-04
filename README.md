@@ -5,4 +5,4 @@ https://greasyfork.org/scripts/601526
 
 Site: https://app.tornscope.com · Developer: Zeussh [4268037]
 
-Install: https://greasyfork.org/scripts/601526
+Install from Greasy Fork: https://greasyfork.org/scripts/601526
