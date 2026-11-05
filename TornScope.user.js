@@ -5,7 +5,7 @@
 // @supportURL   https://app.tornscope.com
 // @downloadURL  https://update.greasyfork.org/scripts/601526/TornScope.user.js
 // @updateURL    https://update.greasyfork.org/scripts/601526/TornScope.meta.js
-// @version      3.8.3
+// @version      3.8.4
 // @description  Track Torn players: flights, landings, alarms, War mode and Premium server tracking. Works with the TornScope site and Torn PDA | Developer: Zeussh (4268037)
 // @match        https://www.torn.com/*
 // @run-at       document-end
@@ -29,7 +29,7 @@
   const ABROAD = 20000;        // target abroad
   const OTHER = 30000;         // hospital, jail...
   const ONLINE_WINDOW = 300;   // seconds: active within the last 5 min = "online"
-  const VERSION = '3.8.3';
+  const VERSION = '3.8.4';
   const TRAVEL_URL = 'https://www.torn.com/page.php?sid=travel';
   const SITE_URL = 'https://app.tornscope.com';
   const LOGO = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none"><g stroke="currentColor" stroke-linecap="round" fill="none"><circle cx="32" cy="32" r="29" stroke-width="3"/><circle cx="32" cy="32" r="19" stroke-width="2" stroke-opacity=".75"/><circle cx="32" cy="32" r="9" stroke-width="2" stroke-opacity=".75"/><path d="M32 4v13M32 47v13M4 32h13M47 32h13" stroke-width="1.5" stroke-opacity=".5"/></g><path d="M32 32L41.0 4.4A29 29 0 0 1 48.8 8.4Z" fill="#16D9F2" fill-opacity="0.07"/><path d="M32 32L48.8 8.4A29 29 0 0 1 55.2 14.5Z" fill="#16D9F2" fill-opacity="0.12"/><path d="M32 32L55.2 14.5A29 29 0 0 1 59.3 22.3Z" fill="#16D9F2" fill-opacity="0.19"/><path d="M32 32L59.3 22.3A29 29 0 0 1 61.0 31.0Z" fill="#16D9F2" fill-opacity="0.3"/><path d="M32 32L61.0 31.0" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="47" cy="19" r="3.6" fill="var(--blip,#fff)" fill-opacity=".2"/><circle cx="47" cy="19" r="2.3" fill="var(--blip,#fff)"/><circle cx="41" cy="11.5" r="1.5" fill="var(--blip,#fff)" fill-opacity=".85"/><circle cx="32" cy="32" r="3" fill="currentColor"/></svg>';
@@ -85,15 +85,13 @@
       try { localStorage.setItem('ttw_' + k, enc); } catch (e) {}
     }
   };
-  const tabId = (() => {
-    try {
-      let t = sessionStorage.getItem('ttw_tab');
-      if (!t) { t = Math.random().toString(36).slice(2); sessionStorage.setItem('ttw_tab', t); }
-      return t;
-    } catch (e) { return Math.random().toString(36).slice(2); }
-  })();
+  // One id per page (3.8.4). It used to live in sessionStorage, which Chrome copies on "Duplicate tab": two tabs then
+  // shared the lock and both tracked (twice the API calls, and one could overwrite the other's landing estimate).
+  // A page that goes away frees its lock, so the same tab reloaded takes over at once.
+  const tabId = Math.random().toString(36).slice(2) + Date.now().toString(36);
   const lockOk = () => { const l = store.get('lock', null); return !l || typeof l !== 'object' || l.id === tabId || !(l.until > Date.now()); };
   const takeLock = () => store.set('lock', { id: tabId, until: Date.now() + 20000 });
+  window.addEventListener('pagehide', () => { try { const l = store.get('lock', null); if (l && l.id === tabId) store.set('lock', null); } catch (e) {} });
 
   /* ================= Account scope + overlay token ================= */
   // `account` is set only after the Worker has confirmed which Torn account the overlay token
@@ -145,7 +143,7 @@
   const targetsKey = () => account ? 'targets_' + account.id : 'targets';
   const normTarget = (t) => ({
     id: String(t.id), name: t.name || '', lastUntil: Number(t.lastUntil) || 0,
-    lastFlightKey: t.lastFlightKey || '', lastSrc: t.lastSrc || '', lastAt: Number(t.lastAt) || 0, plane: PLANES.some(([n]) => n === t.plane) ? t.plane : 'Airstrip'
+    lastFlightKey: t.lastFlightKey || '', lastSrc: t.lastSrc || '', lastAt: Number(t.lastAt) || 0, lastT0: Number(t.lastT0) || 0, plane: PLANES.some(([n]) => n === t.plane) ? t.plane : 'Airstrip'
   });
   const readTargets = (key) => {
     const v = store.get(key, []);
@@ -171,12 +169,26 @@
   let targets = getOverlayToken() ? [] : legacyTargets();
   // The flight a target is on (route + landing). Newest wins (lastAt): a second Torn tab that loaded the list
   // earlier must not wipe the landing this tab estimated at take-off (it came back as "landing unknown").
-  const takeFlight = (t, f) => { t.lastFlightKey = f.lastFlightKey; t.lastUntil = f.lastUntil; t.lastSrc = f.lastSrc; t.lastAt = f.lastAt; };
+  const takeFlight = (t, f) => { t.lastFlightKey = f.lastFlightKey; t.lastUntil = f.lastUntil; t.lastSrc = f.lastSrc; t.lastAt = f.lastAt; if (f.lastT0 || f.lastFlightKey !== t.lastFlightKey) t.lastT0 = f.lastT0 || 0; };
+  // Is flight record `a` better than `b`? Same flight (same route): the one that knows the landing wins, whatever
+  // its date (3.8.4: a tab seeing the player "already flying" must not erase the estimate). Otherwise the newest.
+  const betterFlight = (a, b) => {
+    const nowSec = Date.now() / 1000, aKnows = Number(a.lastUntil) > nowSec, bKnows = Number(b.lastUntil) > nowSec;
+    if (a.lastFlightKey && a.lastFlightKey === b.lastFlightKey && aKnows !== bKnows) return aKnows;
+    return (Number(a.lastAt) || 0) > (Number(b.lastAt) || 0);
+  };
   const saveTargets = () => {
     if (unverified()) return; // never write while the account is not confirmed
     const stored = new Map(readTargets(targetsKey()).map(t => [t.id, t]));
-    for (const t of targets) { const s = stored.get(t.id); if (s && s.lastAt > (Number(t.lastAt) || 0)) takeFlight(t, s); }
+    for (const t of targets) { const s = stored.get(t.id); if (s && betterFlight(s, t)) takeFlight(t, s); }
     store.set(targetsKey(), targets.map(normTarget));
+  };
+  // The flight another tab saved since this page loaded (read at most once per second, the list can be long).
+  let storedCache = { at: 0, map: null };
+  const storedFlight = (id) => {
+    if (unverified()) return null;
+    if (Date.now() - storedCache.at > 1000) storedCache = { at: Date.now(), map: new Map(readTargets(targetsKey()).map(t => [t.id, t])) };
+    return storedCache.map.get(id) || null;
   };
 
   // Fallback only: use this when the API does not provide a usable landing timestamp.
@@ -346,6 +358,16 @@
     return distinct.length === 1 ? Math.min(nowSec, Math.max(windowStartSec, distinct[0].start)) : null;
   }
 
+  // The estimate has passed but the player is still in the air: he flies a slower aircraft than the one set on the card.
+  // Rebuild the landing from the take-off with the fastest aircraft that still lands after now (Airstrip -> Standard…).
+  function reestimate(country, t0Sec, nowSec) {
+    const base = country ? BASE_MIN[country] : 0;
+    if (!base || !(t0Sec > 0)) return null;
+    const fits = PLANES.filter(([n]) => !/book/.test(n)).map(([name, f]) => ({ name, until: t0Sec + Math.round(base * f * 60) }))
+      .filter(x => x.until > nowSec + 20).sort((a, b) => a.until - b.until);
+    return fits[0] || null;
+  }
+
   function onProfile(t, L, d) {
     const st = d.status || {}, la = d.last_action || {}, now = Date.now(), nowSec = Math.floor(now / 1000);
     if (d.name && t.name !== d.name) { t.name = d.name; saveTargets(); }
@@ -387,12 +409,22 @@
       const estimatedMins = estimateFlightMinutes(L.desc, t.plane || 'Airstrip');
       const sameRoute = (k) => { k = String(k || ''); return k === L.desc || k === 'estimate:' + L.desc || k.startsWith(L.desc + '|'); };
 
+      // First look at a player already in the air: another tab may have saved this flight since this page loaded.
+      if (first) { const s = storedFlight(t.id); if (s && sameRoute(s.lastFlightKey) && betterFlight(s, t)) takeFlight(t, s); }
+      const t0Sec = L.t0 ? Math.round(L.t0 / 1000) : (sameRoute(t.lastFlightKey) ? Number(t.lastT0) || 0 : 0);
+      let late = null;
       // Never pretend a flight already in progress just departed when this script starts/reloads.
       if (apiUntil) { L.until = apiUntil; L.untilSrc = 'api'; }
       else if (!newFlight && previousState === 'Traveling' && previousUntil > nowSec) { L.until = previousUntil; }
       else if (first && sameRoute(t.lastFlightKey) && Number(t.lastUntil) > nowSec) { L.until = Number(t.lastUntil); L.untilSrc = t.lastSrc || 'estimate'; }
       else if (newFlight && estimatedMins) { L.until = nowSec + estimatedMins * 60; L.untilSrc = 'estimate'; }
+      else if (!newFlight && (late = reestimate(dest, t0Sec, nowSec))) {
+        L.until = late.until; L.untilSrc = 'estimate'; L.t0 = t0Sec * 1000;
+        // remember the slower aircraft for his next flights
+        if ((PLANES.find(([n]) => n === late.name) || [0, 0])[1] > (PLANES.find(([n]) => n === (t.plane || 'Airstrip')) || [0, 1])[1]) t.plane = late.name;
+      }
       else { L.until = 0; L.untilSrc = ''; }
+      if (first && !L.t0 && t0Sec) L.t0 = t0Sec * 1000;
 
       // One flight = one record: the identity of a flight is its route, not its landing time.
       const record = newFlight || (first && !sameRoute(t.lastFlightKey));
@@ -404,7 +436,7 @@
           if (guessed && nowSec - guessed > 20) { depSec = guessed; quality = 'inferred'; }
         }
         L.t0 = first ? null : depSec * 1000;
-        t.lastFlightKey = L.desc; t.lastUntil = L.until || 0; t.lastSrc = L.untilSrc || ''; t.lastAt = nowSec;
+        t.lastFlightKey = L.desc; t.lastUntil = L.until || 0; t.lastSrc = L.untilSrc || ''; t.lastAt = nowSec; t.lastT0 = first ? 0 : depSec;
         saveTargets();
         queueEvent({
           clientId: t.id + '|departure|' + depSec,
@@ -669,7 +701,7 @@
   function serverFlight(f) {
     if (!f || typeof f !== 'object') return null;
     const until = Math.floor(Number(f.until) || 0), at = Math.floor(Number(f.at) || 0), key = String(f.key || '').slice(0, 80);
-    return key && until > Date.now() / 1000 && at > 0 ? { lastFlightKey: key, lastUntil: until, lastSrc: f.src === 'api' ? 'api' : 'estimate', lastAt: at } : null;
+    return key && until > Date.now() / 1000 && at > 0 ? { lastFlightKey: key, lastUntil: until, lastSrc: f.src === 'api' ? 'api' : 'estimate', lastAt: at, lastT0: at } : null;
   }
   // Use it when this browser has nothing better: no landing ahead, or an older flight. A target seen
   // "already flying" with no landing gets the estimate back right away.
