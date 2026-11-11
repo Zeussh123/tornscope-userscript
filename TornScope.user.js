@@ -5,7 +5,7 @@
 // @supportURL   https://app.tornscope.com
 // @downloadURL  https://update.greasyfork.org/scripts/601526/TornScope.user.js
 // @updateURL    https://update.greasyfork.org/scripts/601526/TornScope.meta.js
-// @version      3.8.4
+// @version      3.8.5
 // @description  Track Torn players: flights, landings, alarms, War mode and Premium server tracking. Works with the TornScope site and Torn PDA | Developer: Zeussh (4268037)
 // @match        https://www.torn.com/*
 // @run-at       document-end
@@ -29,7 +29,7 @@
   const ABROAD = 20000;        // target abroad
   const OTHER = 30000;         // hospital, jail...
   const ONLINE_WINDOW = 300;   // seconds: active within the last 5 min = "online"
-  const VERSION = '3.8.4';
+  const VERSION = '3.8.5';
   const TRAVEL_URL = 'https://www.torn.com/page.php?sid=travel';
   const SITE_URL = 'https://app.tornscope.com';
   const LOGO = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none"><g stroke="currentColor" stroke-linecap="round" fill="none"><circle cx="32" cy="32" r="29" stroke-width="3"/><circle cx="32" cy="32" r="19" stroke-width="2" stroke-opacity=".75"/><circle cx="32" cy="32" r="9" stroke-width="2" stroke-opacity=".75"/><path d="M32 4v13M32 47v13M4 32h13M47 32h13" stroke-width="1.5" stroke-opacity=".5"/></g><path d="M32 32L41.0 4.4A29 29 0 0 1 48.8 8.4Z" fill="#16D9F2" fill-opacity="0.07"/><path d="M32 32L48.8 8.4A29 29 0 0 1 55.2 14.5Z" fill="#16D9F2" fill-opacity="0.12"/><path d="M32 32L55.2 14.5A29 29 0 0 1 59.3 22.3Z" fill="#16D9F2" fill-opacity="0.19"/><path d="M32 32L59.3 22.3A29 29 0 0 1 61.0 31.0Z" fill="#16D9F2" fill-opacity="0.3"/><path d="M32 32L61.0 31.0" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="47" cy="19" r="3.6" fill="var(--blip,#fff)" fill-opacity=".2"/><circle cx="47" cy="19" r="2.3" fill="var(--blip,#fff)"/><circle cx="41" cy="11.5" r="1.5" fill="var(--blip,#fff)" fill-opacity=".85"/><circle cx="32" cy="32" r="3" fill="currentColor"/></svg>';
@@ -368,6 +368,30 @@
     return fits[0] || null;
   }
 
+  // `details` of a hospital / jail status, e.g. 'Mugged by <a href = "http://www.torn.com/profiles.php?XID=123">Bob</a>'.
+  // Kept as plain text plus the other player's ID, so his name can open his profile.
+  function whyOf(details) {
+    if (typeof details !== 'string' || !details.trim()) return null;
+    const xid = (details.match(/XID=(\d{1,10})/i) || [])[1] || '';
+    const plain = (h) => h.replace(/<[^>]*>/g, '').replace(/&#0?39;|&apos;/g, "'").replace(/&quot;/g, '"')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+    const text = plain(details).slice(0, 90);
+    if (!text) return null;
+    const name = xid ? plain((details.match(/<a[^>]*>([^<]*)<\/a>/i) || [])[1] || '') : '';
+    return { text, xid, name, mug: /\bmugg/i.test(text) };
+  }
+  const profileUrl = (id) => 'https://www.torn.com/profiles.php?XID=' + encodeURIComponent(String(id));
+  // Reason chip: the other player's name links to his profile; a mug is highlighted (money taken).
+  function whyHtml(w) {
+    if (!w || !w.text) return '';
+    let body = esc(w.text);
+    if (w.xid && w.name && w.text.includes(w.name)) {
+      const i = w.text.lastIndexOf(w.name);
+      body = esc(w.text.slice(0, i)) + `<a class="pl" href="${profileUrl(w.xid)}" target="_blank" rel="noopener noreferrer" title="Open this player's profile">${esc(w.name)}</a>` + esc(w.text.slice(i + w.name.length));
+    }
+    return ` <span class="why${w.mug ? ' mug' : ''}" title="Reason given by Torn">${w.mug ? '💰 ' : ''}${body}</span>`;
+  }
+
   function onProfile(t, L, d) {
     const st = d.status || {}, la = d.last_action || {}, now = Date.now(), nowSec = Math.floor(now / 1000);
     if (d.name && t.name !== d.name) { t.name = d.name; saveTargets(); }
@@ -386,6 +410,8 @@
     // Some wordings keep the country in `details`: use it only when the description has none.
     if (st.state === 'Traveling' && !destOf(L.desc) && st.details && destOf(st.details)) L.desc = (L.desc + ' ' + st.details).slice(0, 80);
     L.rel = la.relative || '';
+    // Why he is in hospital / jail ("Mugged by X", "Overdosed on Xanax"…): Torn sends it in `details` of the same call.
+    L.why = (st.state === 'Hospital' || st.state === 'Jail') ? whyOf(st.details) : null;
 
     // Observed transitions (never reconstructed): reported to the site through the outbox.
     if (!first && previousState && previousState !== st.state && st.state && st.state !== 'Traveling') {
@@ -901,6 +927,11 @@
   .top{display:flex;align-items:center;gap:6px}
   .tn{font-weight:700;font-size:13px}
   .id{color:#6d7a93;font-size:10.5px}
+  .pf{display:inline-flex;align-items:baseline;gap:6px;min-width:0;color:inherit;text-decoration:none;cursor:pointer}
+  .pf:hover .tn,.pf:focus-visible .tn{color:var(--cy2);text-decoration:underline}.pf:hover .id{color:var(--cy2)}
+  .why{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom;color:#c7d0e2;background:rgba(255,255,255,.06);border-radius:6px;padding:0 6px;font-size:11.5px}
+  .why.mug{color:#fbbf24;background:rgba(251,191,36,.12);font-weight:700}
+  .why .pl{color:inherit;text-decoration:underline}
   .st{margin-left:auto;padding:1px 9px;border-radius:999px;font-size:10.5px;font-weight:700;color:var(--c);background:rgba(255,255,255,.07);white-space:nowrap}
   .ln{margin-top:3px;color:#c7d0e2;font-size:12.5px}.ln i{font-style:normal;color:var(--mut)}
   .mt{margin-top:3px;color:#6d7a93;font-size:11px;display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}
@@ -1124,7 +1155,8 @@
     return { id: String(id), name: String(m && m.name || '').slice(0, 40), level: Math.max(0, Math.floor(Number(m && m.level) || 0)),
       state: String(st.state || '').slice(0, 24), desc: desc.slice(0, 120), until: Math.max(0, Math.floor(Number(st.until) || 0)),
       la: Math.max(0, Math.floor(Number(la.timestamp) || 0)), country: destOf(desc) || '', ret,
-      ptype: String(st.plane_image_type || '').slice(0, 24), takeoff: 0, hosp: 0 };
+      ptype: String(st.plane_image_type || '').slice(0, 24), takeoff: 0, hosp: 0,
+      why: st.state === 'Hospital' || st.state === 'Jail' ? whyOf(st.details) : null };
   }
 
   function warAlert(text) {
@@ -1261,9 +1293,9 @@
           const diff = L.at - (sec + mine), leaveIn = L.at - mine - sec;
           gap = `Leave now (${esc(W.plane)}): you land <b class="${diff >= 0 ? 'v' : 'e'}">${fmtDur(Math.abs(diff))} ${diff >= 0 ? 'before' : 'after'}</b> him · ${leaveIn > 0 ? 'leave in <b class="v">' + fmtDur(leaveIn) + '</b> to land together' : 'too late to land together'}`;
         }
-      } else if (m.state === 'Hospital') line = m.until > sec ? `Hospital <i>· out in ${fmtDur(m.until - sec)}</i>` : 'Hospital <i>· out</i>';
+      } else if (m.state === 'Hospital') line = (m.until > sec ? `Hospital <i>· out in ${fmtDur(m.until - sec)}</i>` : 'Hospital <i>· out</i>') + whyHtml(m.why);
       else line = esc(m.desc || m.state || '—');
-      return `<div class="card" style="--c:${c}"><div class="top"><span class="tn">${esc(m.name || m.id)}</span><span class="id">[${esc(m.id)}] L${m.level}</span><span class="st">${esc(m.state === 'Traveling' ? '✈ Traveling' : m.state || '—')}</span></div>` +
+      return `<div class="card" style="--c:${c}"><div class="top"><a class="pf" href="${profileUrl(m.id)}" target="_blank" rel="noopener noreferrer" title="Open the profile in a new tab"><span class="tn">${esc(m.name || m.id)}</span><span class="id">[${esc(m.id)}] L${m.level}</span></a><span class="st">${esc(m.state === 'Traveling' ? '✈ Traveling' : m.state || '—')}</span></div>` +
         `<div class="ln">${line}</div><div class="mt"><span>active ${esc(ago(m.la))}</span>${gap ? '<span>' + gap + '</span>' : ''}<a class="go" href="https://www.torn.com/profiles.php?XID=${esc(m.id)}" target="_blank" rel="noopener noreferrer">Profile ↗</a></div></div>`;
     }).join('') || (list.length ? '<div class="empty">Nobody is moving. Tick “Show everyone” to see the whole list.</div>' : '');
     $('#wfeed').innerHTML = W.feed.map(f => `<div><i>${esc(new Date(f.at).toLocaleTimeString('en-GB'))}</i> ${esc(f.text)}</div>`).join('');
@@ -1357,8 +1389,9 @@
         const left = L.outAt - now / 1000;
         lv['cd:' + t.id] = left > 0 ? `· out ${hhmm(L.outAt)} (in ${fmtDur(left)})` : '· should be out now';
         if (L.outShift && now / 1000 - L.outShiftAt < 1800) line += ` <span class="${L.outShift < 0 ? 'v' : 'e'}" title="Release time changed since the last check">${L.outShift < 0 ? '−' : '+'}${Math.max(1, Math.round(Math.abs(L.outShift) / 60))} min${L.outShift < 0 ? ' (revived / healed?)' : ''}</span>`;
+        line += whyHtml(L.why);
       }
-      else line = esc(L.desc || '—');
+      else line = esc(L.desc || '—') + ((L.state === 'Hospital' || L.state === 'Jail') ? whyHtml(L.why) : '');
       const src = L.state === 'Traveling' && L.until ? (L.untilSrc === 'api' ? '<span class="v">✓ Torn</span>' : '<span class="e">≈ est.</span>') : '';
       const info = running && Date.now() < tornDownUntil ? `<span class="err">${esc(tornDownText())}</span>` : L.err ? `<span class="err">${esc(L.err)}</span>`
         : (running && L.seen ? `last action ${esc(L.rel || '?')} · ${MODES[L.mode] ? MODES[L.mode]() : '—'}` : (running ? 'first check…' : 'paused'));
@@ -1366,7 +1399,7 @@
             ${PLANES.map(([name]) => `<option value="${esc(name)}"${(t.plane || 'Airstrip') === name ? ' selected' : ''}>✈ ${esc(name)}</option>`).join('')}</select>`;
       const go = (L.state === 'Traveling' || L.state === 'Abroad') ? `<a class="go" href="${TRAVEL_URL}" title="Open Torn's travel page">Travel ↗</a>` : '';
       return `<div class="card${fl ? ' flash' : ''}" style="--c:${COLORS[L.state] || '#64748b'}">
-        <div class="top"><span class="tn">${esc(t.name || 'Player')}</span><span class="id">[${esc(t.id)}]</span>
+        <div class="top"><a class="pf" href="${profileUrl(t.id)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(t.name || 'this player')}'s profile in a new tab"><span class="tn">${esc(t.name || 'Player')}</span><span class="id">[${esc(t.id)}]</span></a>
           <span class="st">${esc(chip(L))}</span><button class="x" data-rm="${esc(t.id)}" title="Remove">×</button></div>
         <div class="ln">${line}</div>${prog}
         <div class="mt">${src}<span>${info}</span>${plane}${go}</div></div>`;
